@@ -60,15 +60,22 @@ func StopRunningProcesses() {
 	)
 }
 
-// Package removes any previous registration of both the original and the
-// renamed package family, then registers the package whose manifest lives
-// at manifestPath.
+// Package removes the broken stock registration of the *original* Apple
+// package identity, if present (first-run migration only -- see
+// docs/root-cause-analysis.md for why that registration is unrecoverable),
+// then registers the package whose manifest lives at manifestPath.
+//
+// It deliberately does NOT remove any existing registration of
+// patcher.NewPackageName: Add-AppxPackage -Register re-registering the
+// same package family in place is what Windows treats as an ordinary app
+// update, which preserves LocalState (Apple ID sign-in, cached library,
+// etc.) across repeated runs of this tool. Removing it first would wipe
+// that data on every single re-run/update.
 func Package(manifestPath string) error {
-	logf("[*] Removing previous package registrations (if any)...")
+	logf("[*] Removing the broken stock registration (%s), if present (first-run migration only)...", patcher.OrigPackageName)
 	removeScript := fmt.Sprintf(
-		"Get-AppxPackage '%s*' | Remove-AppxPackage -ErrorAction SilentlyContinue; "+
-			"Get-AppxPackage '%s*' | Remove-AppxPackage -ErrorAction SilentlyContinue",
-		patcher.NewPackageName, patcher.OrigPackageName,
+		"Get-AppxPackage '%s*' | Remove-AppxPackage -ErrorAction SilentlyContinue",
+		patcher.OrigPackageName,
 	)
 	_, _, _ = runPowerShell(removeScript)
 

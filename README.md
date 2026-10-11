@@ -7,9 +7,11 @@ start because it demands Windows 11.
 [Русская версия ниже](#русская-версия)
 
 > **Disclaimer.** This is an independent, unofficial tool. It is not
-> affiliated with or endorsed by Apple Inc. It does not redistribute any
-> Apple binary — it only patches the `AppleMusic.msixbundle` **you** download
-> yourself from Apple, on your own machine.
+> affiliated with or endorsed by Apple Inc. **This repository contains, and
+> will never contain, any Apple binary.** `install.ps1` downloads the
+> current `AppleMusic.msixbundle` itself, directly from Microsoft's own
+> package delivery servers, at install time — the same mechanism `winget`
+> and the Microsoft Store app use. Nothing is cached or redistributed here.
 
 ## Why this exists
 
@@ -68,26 +70,69 @@ is already fully compatible with.
 
 | Path | What it is |
 |---|---|
-| `cmd/applemusic-patcher/` | Go CLI: unpack → patch → register, in one step |
+| `install.ps1` | One-command installer: downloads the current package from Microsoft, patches it, installs it. No external tools, no third-party sites, no bundled Apple binary. |
+| `cmd/applemusic-patcher/` | Go CLI alternative: same patch logic, operates on a `.msixbundle` you already have on disk |
 | `internal/pe/` | Minimal PE32+/PE32 export-table parser (no external deps) |
 | `internal/patcher/` | The actual patch logic (manifest rewrite + DLL patch) |
 | `internal/msix/` | `.msixbundle`/`.msix` unpacking and signature-file cleanup |
 | `internal/register/` | Thin wrapper around `Add-AppxPackage -Register` |
-| `scripts/patch_apple_music.py` | Reference Python implementation (same logic, zero dependencies) |
+| `scripts/patch_apple_music.py` | Python reference implementation of the Go CLI (same logic, zero dependencies) |
 | `docs/root-cause-analysis.md` | Full write-up of the reverse-engineering |
 
-Both implementations (Go and Python) produce **byte-identical** patched
-output — verified with `Get-FileHash` during development.
+All three implementations (`install.ps1`'s patch step, the Go CLI, and the
+Python script) produce **byte-identical** patched output — verified with
+`Get-FileHash` during development.
 
 ## Usage
 
-1. Download `AppleMusic.msixbundle` yourself (from Apple's official site or
-   the Microsoft Store cache). This tool does not provide it.
-2. Build or download the `applemusic-patcher` binary (see below).
-3. Run it next to the `.msixbundle`, or point it at one explicitly:
+### One-line install (recommended)
+
+Run this in a normal (non-admin) PowerShell window:
 
 ```powershell
-# Auto-detects AppleMusic.msixbundle next to the exe,
+irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 | iex
+```
+
+This single command:
+
+1. Resolves the current Apple Music version and its direct CDN URL from
+   Microsoft's own package delivery servers (`fe3.delivery.mp.microsoft.com`),
+   using the same public protocol `winget`/the Store app use. No
+   `AppleMusic.msixbundle` is ever stored in this repository or downloaded
+   from anywhere other than Microsoft.
+2. Downloads it to a temp folder.
+3. Patches the manifest and `AMP.Utils.dll` (see below for exactly what
+   changes).
+4. Installs into `%LOCALAPPDATA%\Programs\AppleMusic` and registers the
+   package.
+
+To customize the run, download the script first:
+
+```powershell
+irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Launch                      # also launch the app when done
+.\install.ps1 -Dest "D:\Apps\AppleMusic"   # install somewhere else
+.\install.ps1 -KeepDownload                # keep the downloaded/patched files for inspection
+```
+
+**Re-running this script later to pick up an Apple Music update is safe
+and keeps your data.** The package family name (`AppleInc.AppleMusicW10`)
+stays the same across runs, so re-registering is a normal in-place
+update, not a reinstall — your Apple ID sign-in, local library cache, and
+equalizer settings are not touched. See
+[Why updates don't wipe your sign-in](#why-updates-dont-wipe-your-sign-in)
+below for exactly what is and isn't preserved.
+
+### Alternative: Go CLI or Python script, for an `.msixbundle` you already have
+
+If you'd rather download `AppleMusic.msixbundle` yourself (e.g. via the
+Microsoft Store app, or a sideloading tool like
+[store.rg-adguard.net](https://store.rg-adguard.net/)) and patch that exact
+file instead of letting the script fetch the latest one, use the Go CLI or
+the Python script:
+
+```powershell
+# Go CLI -- auto-detects AppleMusic.msixbundle next to the exe,
 # installs into %LOCALAPPDATA%\Programs\AppleMusic, and launches it.
 .\applemusic-patcher.exe -launch
 
@@ -108,19 +153,20 @@ Flags:
 
 Re-running the tool (e.g. after Apple pushes an app update that
 re-overwrites the files) is safe: it detects already-patched files and
-skips them without corrupting anything.
+skips them without corrupting anything, and — like `install.ps1` — it
+never wipes an existing registration of the renamed package family.
 
-### Building from source
+#### Building the Go CLI from source
 
 Requires Go 1.21+.
 
 ```powershell
-git clone https://github.com/<you>/AppleMusicForW10.git
+git clone https://github.com/b3s3da/AppleMusicForW10.git
 cd AppleMusicForW10
 go build -o applemusic-patcher.exe ./cmd/applemusic-patcher
 ```
 
-### Python reference version
+#### Python reference version
 
 `scripts/patch_apple_music.py` implements the identical logic in pure
 Python 3 (standard library only — no `pip install` needed):
@@ -128,6 +174,29 @@ Python 3 (standard library only — no `pip install` needed):
 ```powershell
 python scripts\patch_apple_music.py -s "C:\Downloads\AppleMusic.msixbundle" --launch
 ```
+
+## Why updates don't wipe your sign-in
+
+The first time any of these tools runs on a machine where the *original*,
+unpatched Apple package (`AppleInc.AppleMusicWin`) was ever registered or
+attempted, it removes that registration. That one-time removal is
+required: that package identity's entry in Windows' `StateRepository`
+database is permanently broken on an affected machine (see
+[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)), and nothing
+short of removing it lets the renamed package register cleanly.
+
+Every run after that targets only the renamed package family
+(`AppleInc.AppleMusicW10`) and never removes its existing registration
+first — `Add-AppxPackage -Register` is called directly on top of it. This
+is the same thing Windows does for a normal in-place app update: the
+package's per-user data folder
+(`%LOCALAPPDATA%\Packages\AppleInc.AppleMusicW10_nzyj5cx40ttqa\`), which
+holds your Apple ID sign-in token, local library cache, and equalizer/EQ
+settings, is left untouched. We verified this directly: the contents and
+timestamps of `LocalState`, `LocalCache\Roaming\Apple Computer\Preferences`
+(including `com.apple.Music.eq.plist`), and `Settings\settings.dat` are
+unchanged after re-running the installer to "update" an already-installed
+copy to the same or a newer version.
 
 ## How the patch works, in detail
 
@@ -173,10 +242,12 @@ python scripts\patch_apple_music.py -s "C:\Downloads\AppleMusic.msixbundle" --la
      `GetMusicAppUserModelId`, `LaunchMusicApp`, etc. for package-identity
      checks) is rewritten to `AppleInc.AppleMusicW10` to match the renamed
      manifest `Identity`.
-5. **Register.** Any previous registration of either package family name
-   is removed, then `Add-AppxPackage -Register <path>\AppxManifest.xml`
-   registers the patched package in place, with no store trip and no
-   re-download.
+5. **Register.** The broken stock registration of the original package
+   name is removed only if it's still present (first-run migration — see
+   [above](#why-updates-dont-wipe-your-sign-in)), then
+   `Add-AppxPackage -Register <path>\AppxManifest.xml` registers the
+   patched package in place, with no store trip, no re-download, and no
+   loss of existing sign-in/library data on repeat runs.
 
 ## Limitations / what this does *not* do
 
@@ -211,9 +282,12 @@ MIT. See [`LICENSE`](LICENSE). Not affiliated with Apple Inc.
 не запускаться.
 
 > **Дисклеймер.** Это независимый неофициальный инструмент. Он не
-> связан с Apple Inc. и не одобрен ею. Он не распространяет никакие бинарники
-> Apple — он только патчит `AppleMusic.msixbundle`, который **вы** сами
-> скачиваете у Apple, на своей машине.
+> связан с Apple Inc. и не одобрен ею. **В этом репозитории нет и никогда
+> не будет ни одного бинарника Apple.** `install.ps1` сам скачивает
+> актуальный `AppleMusic.msixbundle` напрямую с серверов доставки пакетов
+> Microsoft в момент установки — тем же механизмом, которым пользуются
+> `winget` и сам клиент Microsoft Store. Здесь ничего не кешируется и не
+> распространяется повторно.
 
 ## Зачем это нужно
 
@@ -276,26 +350,69 @@ Apple Music. Патч только убирает искусственное о�
 
 | Путь | Что это |
 |---|---|
-| `cmd/applemusic-patcher/` | CLI на Go: распаковка → патч → регистрация за один шаг |
+| `install.ps1` | Установщик в одну команду: сам скачивает актуальный пакет у Microsoft, патчит его, устанавливает. Без сторонних инструментов, без сторонних сайтов, без бинарника Apple внутри репозитория. |
+| `cmd/applemusic-patcher/` | Альтернативный CLI на Go: та же логика патча, работает с `.msixbundle`, который уже есть у вас на диске |
 | `internal/pe/` | Минимальный парсер таблицы экспортов PE32+/PE32 (без внешних зависимостей) |
 | `internal/patcher/` | Собственно логика патчей (манифест + DLL) |
 | `internal/msix/` | Распаковка `.msixbundle`/`.msix` и очистка файлов подписи |
 | `internal/register/` | Тонкая обёртка над `Add-AppxPackage -Register` |
-| `scripts/patch_apple_music.py` | Эталонная реализация на Python (та же логика, без зависимостей) |
+| `scripts/patch_apple_music.py` | Эталонная реализация CLI на Python (та же логика, без зависимостей) |
 | `docs/root-cause-analysis.md` | Полный разбор реверс-инжиниринга |
 
-Обе реализации (Go и Python) дают **побайтово идентичный** результат
-патча — проверено через `Get-FileHash` в процессе разработки.
+Все три реализации (патч-шаг `install.ps1`, CLI на Go и скрипт на Python)
+дают **побайтово идентичный** результат — проверено через `Get-FileHash`
+в процессе разработки.
 
 ## Использование
 
-1. Скачайте `AppleMusic.msixbundle` сами (с официального сайта Apple или из
-   кеша Microsoft Store). Этот инструмент его не предоставляет.
-2. Соберите или скачайте бинарь `applemusic-patcher` (см. ниже).
-3. Запустите его рядом с `.msixbundle`, либо явно укажите путь:
+### Установка в одну команду (рекомендуется)
+
+Выполните в обычном (не от администратора) окне PowerShell:
 
 ```powershell
-# Автоматически находит AppleMusic.msixbundle рядом с exe,
+irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 | iex
+```
+
+Эта одна команда:
+
+1. Получает текущую версию Apple Music и прямую ссылку на CDN напрямую с
+   серверов доставки пакетов Microsoft (`fe3.delivery.mp.microsoft.com`),
+   тем же публичным протоколом, которым пользуются `winget` и клиент
+   Store. `AppleMusic.msixbundle` никогда не хранится в этом репозитории и
+   не скачивается ниоткуда, кроме серверов Microsoft.
+2. Скачивает его во временную папку.
+3. Патчит манифест и `AMP.Utils.dll` (подробности ниже).
+4. Устанавливает в `%LOCALAPPDATA%\Programs\AppleMusic` и регистрирует
+   пакет.
+
+Чтобы настроить запуск, сначала скачайте скрипт:
+
+```powershell
+irm https://raw.githubusercontent.com/b3s3da/AppleMusicForW10/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Launch                      # также запустить приложение после установки
+.\install.ps1 -Dest "D:\Apps\AppleMusic"   # установить в другое место
+.\install.ps1 -KeepDownload                # оставить скачанные/пропатченные файлы для проверки
+```
+
+**Повторный запуск этого скрипта позже, чтобы подхватить обновление Apple
+Music, безопасен и сохраняет ваши данные.** Имя семейства пакета
+(`AppleInc.AppleMusicW10`) не меняется между запусками, поэтому
+перерегистрация — это обычное обновление на месте, а не переустановка:
+вход в Apple ID, локальный кеш библиотеки и настройки эквалайзера не
+затрагиваются. Подробности — в разделе
+[Почему обновления не сбрасывают вход](#почему-обновления-не-сбрасывают-вход)
+ниже.
+
+### Альтернатива: CLI на Go или скрипт на Python, для уже скачанного `.msixbundle`
+
+Если вы предпочитаете сами скачать `AppleMusic.msixbundle` (например через
+приложение Microsoft Store или инструмент для сайдлоада, такой как
+[store.rg-adguard.net](https://store.rg-adguard.net/)) и пропатчить именно
+этот файл, а не дать скрипту скачать последнюю версию самому — используйте
+CLI на Go или скрипт на Python:
+
+```powershell
+# CLI на Go — автоматически находит AppleMusic.msixbundle рядом с exe,
 # устанавливает в %LOCALAPPDATA%\Programs\AppleMusic и запускает.
 .\applemusic-patcher.exe -launch
 
@@ -316,19 +433,21 @@ Apple Music. Патч только убирает искусственное о�
 
 Повторный запуск инструмента (например после того, как Apple выпустит
 обновление приложения и перезапишет файлы) безопасен: он обнаруживает уже
-пропатченные файлы и пропускает их без порчи данных.
+пропатченные файлы и пропускает их без порчи данных, и — как и
+`install.ps1` — никогда не удаляет существующую регистрацию
+переименованного семейства пакета.
 
-### Сборка из исходников
+#### Сборка CLI на Go из исходников
 
 Требуется Go 1.21+.
 
 ```powershell
-git clone https://github.com/<you>/AppleMusicForW10.git
+git clone https://github.com/b3s3da/AppleMusicForW10.git
 cd AppleMusicForW10
 go build -o applemusic-patcher.exe ./cmd/applemusic-patcher
 ```
 
-### Эталонная версия на Python
+#### Эталонная версия на Python
 
 `scripts/patch_apple_music.py` реализует идентичную логику на чистом
 Python 3 (только стандартная библиотека — `pip install` не требуется):
@@ -336,6 +455,32 @@ Python 3 (только стандартная библиотека — `pip inst
 ```powershell
 python scripts\patch_apple_music.py -s "C:\Downloads\AppleMusic.msixbundle" --launch
 ```
+
+## Почему обновления не сбрасывают вход
+
+При первом запуске на машине, где когда-либо был зарегистрирован или хотя
+бы пытался зарегистрироваться *оригинальный*, непропатченный пакет Apple
+(`AppleInc.AppleMusicWin`), эта регистрация удаляется. Это единоразовое
+удаление необходимо: запись этого имени пакета в базе `StateRepository`
+Windows навсегда сломана на затронутой машине (см.
+[`docs/root-cause-analysis.md`](docs/root-cause-analysis.md)), и ничто
+кроме удаления не позволяет переименованному пакету зарегистрироваться
+чисто.
+
+Каждый следующий запуск работает только с переименованным семейством
+пакета (`AppleInc.AppleMusicW10`) и никогда не удаляет его существующую
+регистрацию перед установкой — `Add-AppxPackage -Register` вызывается
+прямо поверх неё. Это то же самое, что Windows делает при обычном
+обновлении приложения на месте: папка данных пакета для текущего
+пользователя
+(`%LOCALAPPDATA%\Packages\AppleInc.AppleMusicW10_nzyj5cx40ttqa\`), где
+хранится токен входа в Apple ID, локальный кеш библиотеки и настройки
+эквалайзера, не затрагивается. Мы проверили это напрямую: содержимое и
+временные метки `LocalState`, `LocalCache\Roaming\Apple
+Computer\Preferences` (включая `com.apple.Music.eq.plist`) и
+`Settings\settings.dat` не изменились после повторного запуска установщика
+для "обновления" уже установленной копии до той же или более новой
+версии.
 
 ## Как работает патч, подробно
 
@@ -382,11 +527,13 @@ python scripts\patch_apple_music.py -s "C:\Downloads\AppleMusic.msixbundle" --la
      `GetMusicAppUserModelId`, `LaunchMusicApp` и др. для проверки identity
      пакета) переписывается в `AppleInc.AppleMusicW10`, чтобы совпадать с
      переименованным `Identity` в манифесте.
-5. **Регистрация.** Удаляется любая предыдущая регистрация под обоими
-   именами семейства пакета, затем
+5. **Регистрация.** Сломанная регистрация оригинального имени пакета
+   удаляется только если она ещё присутствует (единоразовая миграция —
+   см. [выше](#почему-обновления-не-сбрасывают-вход)), затем
    `Add-AppxPackage -Register <путь>\AppxManifest.xml` регистрирует
-   пропатченный пакет на месте, без обращения в Store и без повторной
-   загрузки.
+   пропатченный пакет на месте, без обращения в Store, без повторной
+   загрузки и без потери уже существующих данных входа/библиотеки при
+   повторных запусках.
 
 ## Ограничения / чего этот инструмент не делает
 

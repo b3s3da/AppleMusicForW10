@@ -332,13 +332,22 @@ def patch_amp_utils(pkg_dir: Path):
 
 
 def register_package(pkg_dir: Path):
-    """Removes previous package registrations and registers the new one from pkg_dir."""
+    """
+    Removes the broken stock registration of the *original* Apple package
+    identity, if present (first-run migration only -- see
+    ../docs/root-cause-analysis.md for why that registration is
+    unrecoverable), then registers the package from pkg_dir.
+
+    This deliberately does NOT remove any existing registration of
+    NEW_PKG_NAME: re-registering the same package family in place via
+    Add-AppxPackage -Register is what Windows treats as an ordinary app
+    update, which preserves LocalState (Apple ID sign-in, cached library,
+    etc.) across repeated runs. Removing it first would wipe that data on
+    every re-run/update.
+    """
     manifest_path = pkg_dir / "AppxManifest.xml"
-    print("[*] Removing previous package registrations (if any)...")
-    ps_remove = (
-        f"Get-AppxPackage '{NEW_PKG_NAME}*' | Remove-AppxPackage -ErrorAction SilentlyContinue; "
-        f"Get-AppxPackage '{ORIG_PKG_NAME}*' | Remove-AppxPackage -ErrorAction SilentlyContinue"
-    )
+    print(f"[*] Removing the broken stock registration ({ORIG_PKG_NAME}), if present (first-run migration only)...")
+    ps_remove = f"Get-AppxPackage '{ORIG_PKG_NAME}*' | Remove-AppxPackage -ErrorAction SilentlyContinue"
     subprocess.run(["powershell", "-NoProfile", "-Command", ps_remove], check=False)
 
     print(f"[*] Registering package from {manifest_path} ...")
